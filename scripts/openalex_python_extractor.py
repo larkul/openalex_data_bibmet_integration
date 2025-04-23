@@ -245,8 +245,10 @@ def extract_sources(locations):
             # Här extraheras källinformation från OpenAlex JSON
             # I ett verkligt scenario skulle du hämta mer data från platsinformationen
             sources[location['source_id']] = {
-                'id': location['source_id']
-                # Andra fält skulle läggas till här
+                'id': location['source_id'],
+                'display_name': None,  # Behöver källinformation från ursprungliga datan
+                'issn_l': None,
+                'type': None
             }
     return list(sources.values())
 
@@ -326,8 +328,627 @@ def insert_work(conn, work, logfile):
         log_message(logfile, f"Fel vid inmatning av verk {work.get('id')}: {str(e)}")
         return False
 
-# Liknande funktioner för att infoga andra entiteter som författare, institutioner, etc.
-# ...
+def insert_work_ids(conn, work_id, ids, logfile):
+    """Infoga ID-relaterad data"""
+    cur = conn.cursor()
+    
+    try:
+        for id_item in ids:
+            cur.execute("""
+                INSERT INTO openalex.work_ids (work_id, id_type, id_value)
+                VALUES (%s, %s, %s)
+                ON CONFLICT (work_id, id_type) DO UPDATE SET
+                id_value = EXCLUDED.id_value
+            """, (work_id, id_item['id_type'], id_item['id_value']))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av IDs för verk {work_id}: {str(e)}")
+        return False
+
+def insert_author(conn, author, logfile):
+    """Infoga författardata och returnera ID"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om författaren redan finns
+        if author['author_id'] is None:
+            return None
+            
+        cur.execute("""
+            SELECT id FROM openalex.authors 
+            WHERE id = %s
+        """, (author['author_id'],))
+        
+        result = cur.fetchone()
+        if result:
+            # Författaren finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.authors 
+                SET display_name = %s, orcid = %s
+                WHERE id = %s
+            """, (author['display_name'], author['orcid'], author['author_id']))
+        else:
+            # Infoga ny författare
+            cur.execute("""
+                INSERT INTO openalex.authors (id, display_name, orcid)
+                VALUES (%s, %s, %s)
+            """, (author['author_id'], author['display_name'], author['orcid']))
+        
+        conn.commit()
+        return author['author_id']
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av författare {author.get('display_name', 'unknown')}: {str(e)}")
+        return None
+
+def link_author_to_work(conn, work_id, author_id, author_position, is_corresponding, raw_author_name, logfile):
+    """Koppla författare till verk"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om kopplingen redan finns
+        cur.execute("""
+            SELECT id FROM openalex.work_authors 
+            WHERE work_id = %s AND author_id = %s
+        """, (work_id, author_id))
+        
+        result = cur.fetchone()
+        if result:
+            # Kopplingen finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.work_authors 
+                SET author_position = %s, is_corresponding = %s, raw_author_name = %s
+                WHERE work_id = %s AND author_id = %s
+            """, (author_position, is_corresponding, raw_author_name, work_id, author_id))
+        else:
+            # Skapa ny koppling
+            cur.execute("""
+                INSERT INTO openalex.work_authors 
+                (work_id, author_id, author_position, is_corresponding, raw_author_name) 
+                VALUES (%s, %s, %s, %s, %s)
+            """, (work_id, author_id, author_position, is_corresponding, raw_author_name))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid koppling av författare {author_id} till verk {work_id}: {str(e)}")
+        return False
+
+def insert_institution(conn, institution, logfile):
+    """Infoga institutionsdata och returnera ID"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om institutionen redan finns
+        if institution['id'] is None:
+            return None
+            
+        cur.execute("""
+            SELECT id FROM openalex.institutions 
+            WHERE id = %s
+        """, (institution['id'],))
+        
+        result = cur.fetchone()
+        if result:
+            # Institutionen finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.institutions 
+                SET display_name = %s, ror = %s, country_code = %s, type = %s
+                WHERE id = %s
+            """, (institution['display_name'], institution['ror'], 
+                  institution['country_code'], institution['type'], institution['id']))
+        else:
+            # Infoga ny institution
+            cur.execute("""
+                INSERT INTO openalex.institutions 
+                (id, display_name, ror, country_code, type)
+                VALUES (%s, %s, %s, %s, %s)
+            """, (institution['id'], institution['display_name'], 
+                  institution['ror'], institution['country_code'], institution['type']))
+        
+        conn.commit()
+        return institution['id']
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av institution {institution.get('display_name', 'unknown')}: {str(e)}")
+        return None
+
+def link_author_to_institution(conn, work_id, author_id, institution_id, logfile):
+    """Koppla författare till institution i en publikation"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om kopplingen redan finns
+        cur.execute("""
+            SELECT work_id FROM openalex.author_institutions 
+            WHERE work_id = %s AND author_id = %s AND institution_id = %s
+        """, (work_id, author_id, institution_id))
+        
+        if cur.rowcount == 0:
+            # Skapa ny koppling
+            cur.execute("""
+                INSERT INTO openalex.author_institutions 
+                (work_id, author_id, institution_id) 
+                VALUES (%s, %s, %s)
+            """, (work_id, author_id, institution_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid koppling av författare {author_id} till institution {institution_id}: {str(e)}")
+        return False
+
+def insert_concept(conn, concept, logfile):
+    """Infoga konceptdata och returnera ID"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om konceptet redan finns
+        if concept['id'] is None:
+            return None
+            
+        cur.execute("""
+            SELECT id FROM openalex.concepts 
+            WHERE id = %s
+        """, (concept['id'],))
+        
+        result = cur.fetchone()
+        if result:
+            # Konceptet finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.concepts 
+                SET display_name = %s, wikidata = %s, level = %s
+                WHERE id = %s
+            """, (concept['display_name'], concept['wikidata'], concept['level'], concept['id']))
+        else:
+            # Infoga nytt koncept
+            cur.execute("""
+                INSERT INTO openalex.concepts 
+                (id, display_name, wikidata, level)
+                VALUES (%s, %s, %s, %s)
+            """, (concept['id'], concept['display_name'], concept['wikidata'], concept['level']))
+        
+        conn.commit()
+        return concept['id']
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av koncept {concept.get('display_name', 'unknown')}: {str(e)}")
+        return None
+
+def link_concept_to_work(conn, work_id, concept_id, score, logfile):
+    """Koppla koncept till verk"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om kopplingen redan finns
+        cur.execute("""
+            SELECT work_id FROM openalex.work_concepts 
+            WHERE work_id = %s AND concept_id = %s
+        """, (work_id, concept_id))
+        
+        if cur.rowcount > 0:
+            # Kopplingen finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.work_concepts 
+                SET score = %s
+                WHERE work_id = %s AND concept_id = %s
+            """, (score, work_id, concept_id))
+        else:
+            # Skapa ny koppling
+            cur.execute("""
+                INSERT INTO openalex.work_concepts 
+                (work_id, concept_id, score) 
+                VALUES (%s, %s, %s)
+            """, (work_id, concept_id, score))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid koppling av koncept {concept_id} till verk {work_id}: {str(e)}")
+        return False
+
+def insert_topic(conn, topic, logfile):
+    """Infoga topic och relaterad information"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om topic redan finns
+        if topic['id'] is None:
+            return None
+            
+        cur.execute("""
+            SELECT id FROM openalex.topics 
+            WHERE id = %s
+        """, (topic['id'],))
+        
+        result = cur.fetchone()
+        if result:
+            # Topic finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.topics 
+                SET display_name = %s, subfield_id = %s, subfield_name = %s,
+                    field_id = %s, field_name = %s, domain_id = %s, domain_name = %s
+                WHERE id = %s
+            """, (topic['display_name'], topic['subfield_id'], topic['subfield_name'], 
+                  topic['field_id'], topic['field_name'], topic['domain_id'], 
+                  topic['domain_name'], topic['id']))
+        else:
+            # Infoga ny topic
+            cur.execute("""
+                INSERT INTO openalex.topics 
+                (id, display_name, subfield_id, subfield_name, field_id, field_name, domain_id, domain_name)
+                VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+            """, (topic['id'], topic['display_name'], topic['subfield_id'], topic['subfield_name'], 
+                  topic['field_id'], topic['field_name'], topic['domain_id'], topic['domain_name']))
+        
+        conn.commit()
+        return topic['id']
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av topic {topic.get('display_name', 'unknown')}: {str(e)}")
+        return None
+
+def link_topic_to_work(conn, work_id, topic_id, score, logfile):
+    """Koppla topic till verk"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om kopplingen redan finns
+        cur.execute("""
+            SELECT work_id FROM openalex.work_topics 
+            WHERE work_id = %s AND topic_id = %s
+        """, (work_id, topic_id))
+        
+        if cur.rowcount > 0:
+            # Kopplingen finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.work_topics 
+                SET score = %s
+                WHERE work_id = %s AND topic_id = %s
+            """, (score, work_id, topic_id))
+        else:
+            # Skapa ny koppling
+            cur.execute("""
+                INSERT INTO openalex.work_topics 
+                (work_id, topic_id, score) 
+                VALUES (%s, %s, %s)
+            """, (work_id, topic_id, score))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid koppling av topic {topic_id} till verk {work_id}: {str(e)}")
+        return False
+
+def insert_location(conn, work_id, location, logfile):
+    """Infoga lokationsdata"""
+    cur = conn.cursor()
+    
+    try:
+        # Infoga lokation
+        cur.execute("""
+            INSERT INTO openalex.locations 
+            (work_id, source_id, is_oa, landing_page_url, pdf_url, license, version, is_accepted, is_published)
+            VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+            RETURNING id
+        """, (work_id, location['source_id'], location['is_oa'], 
+              location['landing_page_url'], location['pdf_url'], 
+              location['license'], location['version'], 
+              location['is_accepted'], location['is_published']))
+        
+        location_id = cur.fetchone()[0]
+        conn.commit()
+        return location_id
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av lokation för verk {work_id}: {str(e)}")
+        return None
+
+def insert_source(conn, source, logfile):
+    """Infoga källinformation"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om källan redan finns
+        if source['id'] is None:
+            return None
+            
+        cur.execute("""
+            SELECT id FROM openalex.sources 
+            WHERE id = %s
+        """, (source['id'],))
+        
+        result = cur.fetchone()
+        if result:
+            # Källan finns redan, uppdatera om det finns värden att uppdatera
+            if source['display_name'] or source['issn_l'] or source['type']:
+                cur.execute("""
+                    UPDATE openalex.sources 
+                    SET display_name = COALESCE(%s, display_name),
+                        issn_l = COALESCE(%s, issn_l),
+                        type = COALESCE(%s, type)
+                    WHERE id = %s
+                """, (source['display_name'], source['issn_l'], source['type'], source['id']))
+        else:
+            # Infoga ny källa
+            cur.execute("""
+                INSERT INTO openalex.sources 
+                (id, display_name, issn_l, type)
+                VALUES (%s, %s, %s, %s)
+            """, (source['id'], source['display_name'], source['issn_l'], source['type']))
+        
+        conn.commit()
+        return source['id']
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av källa {source.get('id', 'unknown')}: {str(e)}")
+        return None
+
+def insert_reference(conn, work_id, referenced_work_id, logfile):
+    """Infoga referens"""
+    cur = conn.cursor()
+    
+    try:
+        # Infoga referens om den inte redan finns
+        cur.execute("""
+            INSERT INTO openalex.referenced_works 
+            (work_id, referenced_work_id)
+            VALUES (%s, %s)
+            ON CONFLICT (work_id, referenced_work_id) DO NOTHING
+        """, (work_id, referenced_work_id))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av referens från {work_id} till {referenced_work_id}: {str(e)}")
+        return False
+
+def insert_grant(conn, work_id, grant, logfile):
+    """Infoga bidrag"""
+    cur = conn.cursor()
+    
+    try:
+        # Infoga bidrag
+        cur.execute("""
+            INSERT INTO openalex.grants 
+            (work_id, funder, funder_display_name, award_id)
+            VALUES (%s, %s, %s, %s)
+            RETURNING id
+        """, (work_id, grant['funder'], grant['funder_display_name'], grant['award_id']))
+        
+        grant_id = cur.fetchone()[0]
+        conn.commit()
+        return grant_id
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av bidrag för verk {work_id}: {str(e)}")
+        return None
+
+def insert_keyword(conn, keyword, logfile):
+    """Infoga nyckelord"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om nyckelordet redan finns
+        if keyword['id'] is None:
+            return None
+            
+        cur.execute("""
+            SELECT id FROM openalex.keywords 
+            WHERE id = %s
+        """, (keyword['id'],))
+        
+        result = cur.fetchone()
+        if result:
+            # Nyckelordet finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.keywords 
+                SET display_name = %s
+                WHERE id = %s
+            """, (keyword['display_name'], keyword['id']))
+        else:
+            # Infoga nytt nyckelord
+            cur.execute("""
+                INSERT INTO openalex.keywords 
+                (id, display_name)
+                VALUES (%s, %s)
+            """, (keyword['id'], keyword['display_name']))
+        
+        conn.commit()
+        return keyword['id']
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av nyckelord {keyword.get('display_name', 'unknown')}: {str(e)}")
+        return None
+
+def link_keyword_to_work(conn, work_id, keyword_id, score, logfile):
+    """Koppla nyckelord till verk"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om kopplingen redan finns
+        cur.execute("""
+            SELECT work_id FROM openalex.work_keywords 
+            WHERE work_id = %s AND keyword_id = %s
+        """, (work_id, keyword_id))
+        
+        if cur.rowcount > 0:
+            # Kopplingen finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.work_keywords 
+                SET score = %s
+                WHERE work_id = %s AND keyword_id = %s
+            """, (score, work_id, keyword_id))
+        else:
+            # Skapa ny koppling
+            cur.execute("""
+                INSERT INTO openalex.work_keywords 
+                (work_id, keyword_id, score) 
+                VALUES (%s, %s, %s)
+            """, (work_id, keyword_id, score))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid koppling av nyckelord {keyword_id} till verk {work_id}: {str(e)}")
+        return False
+
+def insert_sdg(conn, sdg, logfile):
+    """Infoga hållbarhetsmål"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om SDG redan finns
+        if sdg['id'] is None:
+            return None
+            
+        cur.execute("""
+            SELECT id FROM openalex.sdgs 
+            WHERE id = %s
+        """, (sdg['id'],))
+        
+        result = cur.fetchone()
+        if result:
+            # SDG finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.sdgs 
+                SET display_name = %s
+                WHERE id = %s
+            """, (sdg['display_name'], sdg['id']))
+        else:
+            # Infoga ny SDG
+            cur.execute("""
+                INSERT INTO openalex.sdgs 
+                (id, display_name)
+                VALUES (%s, %s)
+            """, (sdg['id'], sdg['display_name']))
+        
+        conn.commit()
+        return sdg['id']
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid inmatning av SDG {sdg.get('display_name', 'unknown')}: {str(e)}")
+        return None
+
+def link_sdg_to_work(conn, work_id, sdg_id, score, logfile):
+    """Koppla SDG till verk"""
+    cur = conn.cursor()
+    
+    try:
+        # Kontrollera om kopplingen redan finns
+        cur.execute("""
+            SELECT work_id FROM openalex.work_sdgs 
+            WHERE work_id = %s AND sdg_id = %s
+        """, (work_id, sdg_id))
+        
+        if cur.rowcount > 0:
+            # Kopplingen finns redan, uppdatera
+            cur.execute("""
+                UPDATE openalex.work_sdgs 
+                SET score = %s
+                WHERE work_id = %s AND sdg_id = %s
+            """, (score, work_id, sdg_id))
+        else:
+            # Skapa ny koppling
+            cur.execute("""
+                INSERT INTO openalex.work_sdgs 
+                (work_id, sdg_id, score) 
+                VALUES (%s, %s, %s)
+            """, (work_id, sdg_id, score))
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid koppling av SDG {sdg_id} till verk {work_id}: {str(e)}")
+        return False
+
+def run_matching_script(conn, script_path, logfile):
+    """Kör matchningsskript"""
+    log_message(logfile, f"Kör matchningsskript {script_path}")
+    
+    try:
+        # Skapa nödvändiga matchningstabeller om de inte finns
+        cur = conn.cursor()
+        
+        # Kontrollera om kopplingstabell finns
+        try:
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS "cross".gup2openalex (
+                    work_id VARCHAR(255) NOT NULL,
+                    matched_round VARCHAR(255) NOT NULL,
+                    last_modified DATE DEFAULT CURRENT_DATE,
+                    pubid INTEGER NOT NULL,
+                    CONSTRAINT "PK_GUPOALEX" PRIMARY KEY (work_id, matched_round, pubid)
+                )
+            """)
+            conn.commit()
+        except Exception as e:
+            conn.rollback()
+            log_message(logfile, f"Fel vid skapande av kopplingstabell: {str(e)}")
+        
+        # Kör matchningsskriptet
+        with open(script_path, 'r') as f:
+            sql = f.read()
+        
+        cur.execute(sql)
+        conn.commit()
+        
+        # Kontrollera matchningsresultat
+        cur.execute("""
+            SELECT matched_round, COUNT(*) 
+            FROM "cross".gup2openalex 
+            GROUP BY matched_round 
+            ORDER BY COUNT(*) DESC
+        """)
+        
+        log_message(logfile, "Matchningsresultat:")
+        for row in cur.fetchall():
+            log_message(logfile, f"  {row[0]}: {row[1]} matchningar")
+        
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid körning av matchningsskript: {str(e)}")
+        return False
+
+def clean_db_tables(conn, logfile):
+    """Rensa databastabeller för ny import"""
+    cur = conn.cursor()
+    try:
+        # Återställ processed-flaggan
+        cur.execute("UPDATE openalex.raw_json SET processed = FALSE")
+        
+        # Töm tabellerna
+        cur.execute("TRUNCATE openalex.works CASCADE")
+        cur.execute("TRUNCATE openalex.authors CASCADE")
+        cur.execute("TRUNCATE openalex.institutions CASCADE")
+        cur.execute("TRUNCATE openalex.concepts CASCADE")
+        cur.execute("TRUNCATE openalex.topics CASCADE")
+        cur.execute("TRUNCATE openalex.keywords CASCADE")
+        cur.execute("TRUNCATE openalex.sdgs CASCADE")
+        
+        # Töm även cross-schemat om det finns
+        try:
+            cur.execute('TRUNCATE "cross".gup2openalex CASCADE')
+        except:
+            log_message(logfile, "Notera: cross.gup2openalex-tabell finns inte eller kan inte rensas")
+        
+        conn.commit()
+        return True
+    except Exception as e:
+        conn.rollback()
+        log_message(logfile, f"Fel vid rensning av tabeller: {str(e)}")
+        return False
 
 def process_json_records(conn, logfile, batch_size=100):
     """Bearbeta JSON-poster från databasen"""
@@ -368,22 +989,85 @@ def process_json_records(conn, logfile, batch_size=100):
                 for item in items:
                     # Extrahera data från OpenAlex JSON
                     work = extract_work_data(item)
-                    ids = extract_ids(item)
-                    authors = extract_authors(item)
-                    institutions = extract_institutions(authors)
-                    concepts = extract_concepts(item)
-                    topics = extract_topics(item)
-                    locations = extract_locations(item)
-                    sources = extract_sources(locations)
-                    references = extract_references(item)
-                    grants = extract_grants(item)
-                    keywords = extract_keywords(item)
-                    sdgs = extract_sdgs(item)
                     
                     # Infoga i databasen
                     if insert_work(conn, work, logfile):
-                        # Infoga relaterad data (författare, institutioner, etc.)
-                        # ...
+                        # Infoga relaterad data
+                        
+                        # IDs
+                        ids = extract_ids(item)
+                        insert_work_ids(conn, work['id'], ids, logfile)
+                        
+                        # Författare och institutioner
+                        authors = extract_authors(item)
+                        for author in authors:
+                            author_id = insert_author(conn, author, logfile)
+                            if author_id:
+                                link_author_to_work(conn, work['id'], author_id, 
+                                                  author['author_position'], 
+                                                  author['is_corresponding'],
+                                                  author['raw_author_name'], logfile)
+                                
+                                # Koppla författare till institutioner
+                                for inst in author.get('institutions', []):
+                                    if 'id' in inst:
+                                        institution_id = insert_institution(conn, {
+                                            'id': inst.get('id'),
+                                            'display_name': inst.get('display_name'),
+                                            'ror': inst.get('ror'),
+                                            'country_code': inst.get('country_code'),
+                                            'type': inst.get('type')
+                                        }, logfile)
+                                        
+                                        if institution_id:
+                                            link_author_to_institution(conn, work['id'], author_id, institution_id, logfile)
+                        
+                        # Koncept
+                        concepts = extract_concepts(item)
+                        for concept in concepts:
+                            concept_id = insert_concept(conn, concept, logfile)
+                            if concept_id:
+                                link_concept_to_work(conn, work['id'], concept_id, concept.get('score'), logfile)
+                        
+                        # Topics
+                        topics = extract_topics(item)
+                        for topic in topics:
+                            topic_id = insert_topic(conn, topic, logfile)
+                            if topic_id:
+                                link_topic_to_work(conn, work['id'], topic_id, topic.get('score'), logfile)
+                        
+                        # Lokationer och källor
+                        locations = extract_locations(item)
+                        for location in locations:
+                            if location.get('source_id'):
+                                insert_source(conn, {'id': location['source_id'], 'display_name': None, 'issn_l': None, 'type': None}, logfile)
+                            insert_location(conn, work['id'], location, logfile)
+                        
+                        # Referenser
+                        references = extract_references(item)
+                        for reference in references:
+                            insert_reference(conn, work['id'], reference, logfile)
+                        
+                        # Bidrag
+                        grants = extract_grants(item)
+                        for grant in grants:
+                            insert_grant(conn, work['id'], grant, logfile)
+                        
+                        # Nyckelord
+                        keywords = extract_keywords(item)
+                        for keyword in keywords:
+                            if keyword.get('id'):
+                                keyword_id = insert_keyword(conn, keyword, logfile)
+                                if keyword_id:
+                                    link_keyword_to_work(conn, work['id'], keyword_id, keyword.get('score'), logfile)
+                        
+                        # SDGs
+                        sdgs = extract_sdgs(item)
+                        for sdg in sdgs:
+                            if sdg.get('id'):
+                                sdg_id = insert_sdg(conn, sdg, logfile)
+                                if sdg_id:
+                                    link_sdg_to_work(conn, work['id'], sdg_id, sdg.get('score'), logfile)
                         
                         batch_success += 1
                         total_success += 1
@@ -424,7 +1108,7 @@ def main():
     ROOT_DIR = os.environ.get('ROOT_DIR', os.path.expanduser('~/bibmet-utils'))
     
     if args.logfile is None:
-        log_dir = os.path.join(ROOT_DIR, 'prepare_openalex/current/log')
+        log_dir = os.path.join(ROOT_DIR, 'extract_openalex_json/current/log')
         os.makedirs(log_dir, exist_ok=True)
         logfile = os.path.join(log_dir, 'openalex-extractor.log')
     else:
@@ -454,8 +1138,11 @@ def main():
         
         # Rensa databastabellerna om begärt
         if args.clean:
-            # Implementera rensning här
-            pass
+            log_message(logfile, "Rensar databastabeller...")
+            if clean_db_tables(conn, logfile):
+                log_message(logfile, "Databastabeller rensade framgångsrikt")
+            else:
+                log_message(logfile, "Misslyckades att rensa databastabeller")
         
         # Bearbeta JSON-poster om inte i match-only-läge
         if not args.only_match:
@@ -467,11 +1154,39 @@ def main():
         
         # Kör matchningsskript om inte inaktiverat
         if not args.no_match and os.path.exists(match_script):
-            # Implementera matchning här
-            pass
+            log_message(logfile, "Kör matchningsskript...")
+            if run_matching_script(conn, match_script, logfile):
+                log_message(logfile, "Matchning slutförd framgångsrikt")
+            else:
+                log_message(logfile, "Matchningsskript misslyckades")
         
         # Visa statistik
-        # ...
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM openalex.works")
+        work_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM openalex.authors")
+        author_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM openalex.work_authors")
+        work_author_count = cur.fetchone()[0]
+        
+        cur.execute("SELECT COUNT(*) FROM openalex.institutions")
+        institution_count = cur.fetchone()[0]
+        
+        # Försök få matchningsantal
+        try:
+            cur.execute('SELECT COUNT(*) FROM "cross".gup2openalex')
+            match_count = cur.fetchone()[0]
+        except:
+            match_count = 0
+        
+        log_message(logfile, f"Statistik:")
+        log_message(logfile, f"  Verk: {work_count}")
+        log_message(logfile, f"  Författare: {author_count}")
+        log_message(logfile, f"  Verk-Författare-kopplingar: {work_author_count}")
+        log_message(logfile, f"  Institutioner: {institution_count}")
+        log_message(logfile, f"  GUP-OpenAlex-matchningar: {match_count}")
         
         # Stäng anslutning
         conn.close()
