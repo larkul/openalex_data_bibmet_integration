@@ -50,11 +50,12 @@ CREATE INDEX IF NOT EXISTS idx_openalex_tmp_year ON tmp.openalex_tmp(publication
 INSERT INTO "cross".gup2openalex (pubid, work_id, matched_round)
 SELECT DISTINCT p.id, 
                 oa.work_id, 
-                'exact-doi'
+                'exact-doi-improved'
 FROM publications p
 JOIN publication_versions pv ON pv.id = p.current_version_id
 JOIN publication_identifiers pi ON pi.publication_version_id = pv.id
-JOIN tmp.openalex_tmp oa ON UPPER(oa.doi_normal) = UPPER(pi.identifier_value)
+JOIN tmp.openalex_tmp oa 
+ON REPLACE(UPPER(oa.doi_normal), 'HTTPS://DOI.ORG/', '') = UPPER(pi.identifier_value)
 WHERE pi.identifier_code = 'doi'
 AND p.deleted_at IS NULL
 AND p.published_at IS NOT NULL
@@ -88,16 +89,6 @@ WHERE p.deleted_at IS NULL
 AND p.published_at IS NOT NULL
 AND NOT EXISTS (SELECT 1 FROM "cross".gup2openalex WHERE pubid = p.id);
 
--- Eventuellt koppla även via WoS
-INSERT INTO "cross".gup2openalex (pubid, work_id, matched_round)
-SELECT DISTINCT g2w.pubid,
-                oa.work_id,
-                'via-wos'
-FROM "cross".gup2wos_json g2w
-JOIN wos.articles wa ON wa.uid = g2w.uid
-JOIN openalex.works ow ON UPPER(ow.doi) = UPPER(wa.doi)
-JOIN tmp.openalex_tmp oa ON oa.work_id = ow.id
-WHERE NOT EXISTS (SELECT 1 FROM "cross".gup2openalex WHERE pubid = g2w.pubid);
 
 -- Skapa index för bättre prestanda
 CREATE INDEX IF NOT EXISTS idx_gup2openalex_pubid ON "cross".gup2openalex(pubid);
