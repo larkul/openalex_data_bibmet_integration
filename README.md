@@ -1,8 +1,7 @@
 # Installations- och användarinstruktioner för OpenAlex Python Extractor
 
 ## Översikt
-OpenAlex JSON-importsystemet är designat för att effektivt importera och bearbeta metadata från OpenAlex API till ett relationsdatabasformat. Systemet hanterar den komplexa JSON-strukturen från OpenAlex och omvandlar den till strukturerad data som kan användas för sökning, analys och integrering med övriga bibliometriska system.
-
+OpenAlex JSON-importsysteme för att effektivt importera och bearbeta metadata från OpenAlex API till ett relationsdatabasformat. Systemet hanterar JSON-strukturen från OpenAlex och omvandlar den till strukturerad data i postgresql
 ## Ingående komponenter
 
 Systemet består av följande huvudkomponenter:
